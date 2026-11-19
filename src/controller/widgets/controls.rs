@@ -1,4 +1,4 @@
-use egui::{Grid, Ui};
+use egui::{Grid, Slider, Ui};
 
 use crate::controller::{components::UIComponents, icons, settings::Settings};
 
@@ -18,6 +18,20 @@ impl ControlsWidget {
     pub fn show(&self, ui: &mut Ui, settings: &mut Settings) {
         ui.checkbox(&mut settings.erase_brush, "Erase Brush")
             .on_hover_text("Enable the erase brush to remove streamlines from the visualization. (Left(Control(CTRL)) + Caps Lock to toggle)");
+        // Brush radius size slider, only enabled when erase_brush is true
+        ui.add_enabled(
+            settings.erase_brush,
+            Slider::new(&mut settings.brush_radius, 0.01..=100.0)
+                .text("Brush radius")
+                .suffix(" px"),
+        );
+        ui.add_enabled(
+            settings.erase_brush,
+            egui::Checkbox::new(
+                &mut settings.show_brush_center_dot,
+                "Show center dot",
+            ),
+        );
         let camera_actions = [
             ("Rotate", "Left Mouse Button"),
             ("Pan", "Right Mouse Button"),

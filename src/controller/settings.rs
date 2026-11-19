@@ -103,6 +103,10 @@ pub struct Settings {
     pub mirror_fresnel: bool,
     /// erase brush
     pub erase_brush: bool,
+    /// brush radius
+    pub brush_radius: f32,
+    /// Show a fixed center dot at the exact brush position.
+    pub show_brush_center_dot: bool,
 }
 
 impl Settings {
@@ -148,6 +152,8 @@ impl Settings {
             ray_traced: false,
             mirror_fresnel: false,
             erase_brush: false,
+            brush_radius: 10.0,
+            show_brush_center_dot: true,
         }
     }
 }

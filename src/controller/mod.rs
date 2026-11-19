@@ -390,7 +390,20 @@ impl Controller {
         if self.settings.erase_brush {
             if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
                 if viewport.response.rect.contains(pointer) {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                    ui.ctx()
+                        .set_cursor_icon(egui::CursorIcon::None);
+
+                    ui.painter().circle_stroke(
+                        pointer,
+                        self.settings.brush_radius,
+                        egui::Stroke::new(1.5, egui::Color32::RED),
+                    );
+                    if self.settings.show_brush_center_dot
+                        && self.settings.brush_radius > 1.0
+                    {
+                        ui.painter()
+                            .circle_filled(pointer, 1.0, egui::Color32::DARK_GRAY);
+                    }
                 }
             }
         }
