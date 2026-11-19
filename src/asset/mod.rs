@@ -190,6 +190,33 @@ impl Asset {
         });
         self.tractography.update(gpu, controller, mm_per_voxel);
 
+        if controller.settings().erase_brush && controller.brush_dragging() {
+            let (origin, direction) = controller.brush_ray();
+            let extent = controller.camera().extent();
+            let radius = controller.settings().brush_radius
+                * 2.0
+                * extent
+                / controller.settings().height.max(1) as f32;
+
+            // TODO: PROTOTYPE — CPU voxel traversal and CPU->GPU write_texture.
+            // Replace this block with a WGSL compute dispatch operating on a
+            // dedicated resection mask texture. Keep the uploaded clinical data
+            // and tumour segmentation immutable.
+            if let Some(mask_index) = controller.volumes().erase_mask_index(&self.volumes) {
+                if let Some(mask) = self.masks.get_mut(mask_index) {
+                    if let Some(hit) = mask.ray_hit(origin, direction) {
+                        mask.erase_sphere(
+                            gpu,
+                            hit,
+                            radius,
+                            controller.brush_drag_started(),
+                        );
+                        self.changed = true;
+                    }
+                }
+            }
+        }
+
         if let Some(line) = &self.line {
             line.update_settings(gpu);
         }
