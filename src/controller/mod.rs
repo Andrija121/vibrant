@@ -12,13 +12,14 @@ use camera::Camera;
 use egui::{Align, CentralPanel, Frame, Layout, Ui};
 use egui::{Panel, Rect};
 use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle};
-use event::Event;
+use event::{Event,Key};
 use light::Light;
 use settings::Settings;
 use state::ControllerState;
 use status::Status;
 use web_time::Instant;
 use winit::dpi::PhysicalSize;
+use glam::{Vec3, Vec4Swizzles};
 
 use crate::controller::widgets::controls::ControlsWidget;
 use crate::controller::widgets::{
@@ -142,7 +143,15 @@ impl egui_dock::TabViewer for ControllerTabViewer<'_> {
                 );
             }
             Tab::Controls => {
-                self.controls_widget.show(ui);
+                let erase_target_name = self.volumes_widget.erase_target_name(
+                    &self.asset.volumes,
+                    &self.asset.masks,
+                );
+                self.controls_widget.show(
+                    ui,
+                    self.settings,
+                    erase_target_name,
+                );
             }
             Tab::Debug => {
                 self.rendering_widget.show_debug(
@@ -174,6 +183,10 @@ pub struct Controller {
 
     viewport: Rect,
     hovered: bool,
+    brush_ray_origin: Vec3,
+    brush_ray_direction: Vec3,
+    brush_dragging: bool,
+    brush_drag_started: bool,
 }
 
 impl Default for Controller {
@@ -202,6 +215,10 @@ impl Controller {
 
             viewport: Rect::ZERO,
             hovered: true,
+            brush_ray_origin: Vec3::ZERO,
+            brush_ray_direction: Vec3::Z,
+            brush_dragging: false,
+            brush_drag_started: false,
         }
     }
 
@@ -260,9 +277,17 @@ impl Controller {
     }
 
     pub fn event(&mut self, event: Event) {
+        // Toggle brush selection
+        let toggle_brush =
+            self.state.control && matches!(event, Event::KeyPressed(Key::CapsLock));
         self.state = self.state.update(event);
+        if toggle_brush {
+            self.settings.erase_brush = !self.settings.erase_brush;
+        }
 
-        self.camera.update(&self.state);
+        if !self.settings.erase_brush {
+            self.camera.update(&self.state);
+        }
         self.light.update(&self.state);
     }
 
@@ -381,6 +406,57 @@ impl Controller {
         });
 
         self.hovered = viewport.response.hovered();
+        self.brush_dragging = false;
+        self.brush_drag_started = false;
+        // TODO(BRUSH-RAY-001): egui and winit provide the mouse interaction.
+        // The generated world-space ray is currently used for CPU hit testing.
+        // Later, forward the brush center/radius to a GPU compute shader.
+        if self.settings.erase_brush {
+            if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
+                if viewport.response.rect.contains(pointer) {
+                    let ndc_x = 2.0 * (pointer.x - viewport.response.rect.min.x)
+                        / viewport.response.rect.width()
+                        - 1.0;
+                    let ndc_y = 1.0 - 2.0 * (pointer.y - viewport.response.rect.min.y)
+                        / viewport.response.rect.height();
+
+                    let view_near = self.camera.projection().inverse()
+                        * glam::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+                    let view_far = self.camera.projection().inverse()
+                        * glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+                    let near = view_near.xyz() / view_near.w;
+                    let far = view_far.xyz() / view_far.w;
+                    let world_near = self.camera.transform().transform_point3(near);
+                    let world_far = self.camera.transform().transform_point3(far);
+
+                    self.brush_ray_origin = world_near;
+                    self.brush_ray_direction = (world_far - world_near).normalize();
+
+                    let primary_down = ui.input(|input| input.pointer.primary_down());
+                    if primary_down {
+                        self.brush_dragging = true;
+                        if ui.input(|input| input.pointer.primary_pressed()) {
+                            self.brush_drag_started = true;
+                        }
+                    }
+
+                    ui.ctx()
+                        .set_cursor_icon(egui::CursorIcon::None);
+
+                    ui.painter().circle_stroke(
+                        pointer,
+                        self.settings.brush_radius,
+                        egui::Stroke::new(1.5, egui::Color32::RED),
+                    );
+                    if self.settings.show_brush_center_dot
+                        && self.settings.brush_radius > 1.0
+                    {
+                        ui.painter()
+                            .circle_filled(pointer, 1.0, egui::Color32::DARK_GRAY);
+                    }
+                }
+            }
+        }
         self.viewport = viewport.response.rect * scale;
         self.camera.set_aspect(self.viewport.aspect_ratio());
     }
@@ -430,6 +506,18 @@ impl Controller {
 
     pub fn hovered(&self) -> bool {
         self.hovered
+    }
+
+    pub fn brush_ray(&self) -> (Vec3, Vec3) {
+        (self.brush_ray_origin, self.brush_ray_direction)
+    }
+
+    pub fn brush_dragging(&self) -> bool {
+        self.brush_dragging
+    }
+
+    pub fn brush_drag_started(&self) -> bool {
+        self.brush_drag_started
     }
 
     pub fn lighting_changed(&self) -> bool {
