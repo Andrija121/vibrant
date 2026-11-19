@@ -12,7 +12,7 @@ use camera::Camera;
 use egui::{Align, CentralPanel, Frame, Layout, Ui};
 use egui::{Panel, Rect};
 use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle};
-use event::Event;
+use event::{Event,Key};
 use light::Light;
 use settings::Settings;
 use state::ControllerState;
@@ -142,7 +142,7 @@ impl egui_dock::TabViewer for ControllerTabViewer<'_> {
                 );
             }
             Tab::Controls => {
-                self.controls_widget.show(ui);
+                self.controls_widget.show(ui, self.settings);
             }
             Tab::Debug => {
                 self.rendering_widget.show_debug(
@@ -260,7 +260,13 @@ impl Controller {
     }
 
     pub fn event(&mut self, event: Event) {
+        // Toggle brush selection
+        let toggle_brush =
+            self.state.control && matches!(event, Event::KeyPressed(Key::CapsLock));
         self.state = self.state.update(event);
+        if toggle_brush {
+            self.settings.erase_brush = !self.settings.erase_brush;
+        }
 
         self.camera.update(&self.state);
         self.light.update(&self.state);
@@ -381,6 +387,13 @@ impl Controller {
         });
 
         self.hovered = viewport.response.hovered();
+        if self.settings.erase_brush {
+            if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
+                if viewport.response.rect.contains(pointer) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                }
+            }
+        }
         self.viewport = viewport.response.rect * scale;
         self.camera.set_aspect(self.viewport.aspect_ratio());
     }

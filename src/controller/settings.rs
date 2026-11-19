@@ -101,6 +101,8 @@ pub struct Settings {
     /// Ray traced: Fresnel at the mirror direction for the whole lobe, as the
     /// cascade, instead of per microfacet.
     pub mirror_fresnel: bool,
+    /// erase brush
+    pub erase_brush: bool,
 }
 
 impl Settings {
@@ -145,6 +147,7 @@ impl Settings {
             noise: Noise::Blue,
             ray_traced: false,
             mirror_fresnel: false,
+            erase_brush: false,
         }
     }
 }

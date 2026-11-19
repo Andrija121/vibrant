@@ -1,6 +1,6 @@
 use egui::{Grid, Ui};
 
-use crate::controller::{components::UIComponents, icons};
+use crate::controller::{components::UIComponents, icons, settings::Settings};
 
 pub struct ControlsWidget {}
 
@@ -15,7 +15,9 @@ impl ControlsWidget {
         Self {}
     }
 
-    pub fn show(&self, ui: &mut Ui) {
+    pub fn show(&self, ui: &mut Ui, settings: &mut Settings) {
+        ui.checkbox(&mut settings.erase_brush, "Erase Brush")
+            .on_hover_text("Enable the erase brush to remove streamlines from the visualization. (Left(Control(CTRL)) + Caps Lock to toggle)");
         let camera_actions = [
             ("Rotate", "Left Mouse Button"),
             ("Pan", "Right Mouse Button"),
