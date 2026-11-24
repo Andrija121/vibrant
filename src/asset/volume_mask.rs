@@ -59,6 +59,45 @@ impl VolumeMaskBuffer {
 
         Self::from_texture_settings(texture, settings)
     }
+    pub fn new_resection_mask(gpu: &Gpu, size: Extent3d) -> Self {
+        let label = Some("Resection Mask");
+
+        let total_voxels = (size.width * size.height * size.depth_or_array_layers) as usize;
+        
+        
+        let data = vec![1.0f32; total_voxels];
+
+        let texture = gpu.device().create_texture_with_data(
+            gpu.queue(),
+            &TextureDescriptor {
+                label,
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D3,
+                // Χρησιμοποιούμε R32Float ώστε να υποστηρίζει STORAGE_BINDING για τη βούρτσα αργότερα
+                format: TextureFormat::R32Float,
+                usage: TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::STORAGE_BINDING
+                    | TextureUsages::COPY_DST
+                    | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            },
+            TextureDataOrder::LayerMajor,
+            cast_slice(&data),
+        );
+
+        let settings = VolumeMaskSettings {
+            name: "Resection Mask".to_string(),
+            visible: true,
+            offset: 0.0,
+            width: 0.0,
+            inverted: false,
+            sdf: false,
+        };
+
+        Self::from_texture_settings(texture, settings)
+    }
 
     pub fn size(&self) -> Extent3d {
         self.texture.size()

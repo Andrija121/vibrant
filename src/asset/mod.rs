@@ -138,6 +138,13 @@ impl Asset {
                     self.volumes
                         .push(VolumeFractionBuffer::new(gpu, volume, &self.colormap));
                     loaded_volume = true;
+                    let mask_size = wgpu::Extent3d {
+                        width: volume.size().x,
+                        height: volume.size().y,
+                        depth_or_array_layers: volume.size().z,
+                    };
+                    self.masks
+                        .push(VolumeMaskBuffer::new_resection_mask(gpu, mask_size));
                 }
             }
 
