@@ -135,16 +135,33 @@ impl Asset {
                     self.masks.push(VolumeMaskBuffer::new(gpu, volume));
                     loaded_mask = true;
                 } else {
-                    self.volumes
-                        .push(VolumeFractionBuffer::new(gpu, volume, &self.colormap));
-                    loaded_volume = true;
+                    let base_name = format!("Resection Mask - {}", volume.name());
+                    let mut name = base_name.clone();
+                    let mut suffix = 2;
+                    while self
+                        .masks
+                        .iter()
+                        .any(|mask| mask.settings().name == name)
+                    {
+                        name = format!("{base_name} ({suffix})");
+                        suffix += 1;
+                    }
+
                     let mask_size = wgpu::Extent3d {
                         width: volume.size().x,
                         height: volume.size().y,
                         depth_or_array_layers: volume.size().z,
                     };
-                    self.masks
-                        .push(VolumeMaskBuffer::new_resection_mask(gpu, mask_size));
+                    self.masks.push(VolumeMaskBuffer::new_resection_mask(
+                        gpu,
+                        mask_size,
+                        volume.transform(),
+                        name,
+                    ));
+
+                    self.volumes
+                        .push(VolumeFractionBuffer::new(gpu, volume, &self.colormap));
+                    loaded_volume = true;
                 }
             }
 
@@ -209,8 +226,9 @@ impl Asset {
             // Replace this block with a WGSL compute dispatch operating on a
             // dedicated resection mask texture. Keep the uploaded clinical data
             // and tumour segmentation immutable.
-            if let Some(mask_index) = controller.volumes().erase_mask_index(&self.volumes) {
-                if let Some(mask) = self.masks.get_mut(mask_index) {
+            let mask_index = controller.settings().erase_mask;
+            if let Some(mask) = self.masks.get_mut(mask_index) {
+                if mask.settings().name != "None" {
                     if let Some(hit) = mask.ray_hit(origin, direction) {
                         mask.erase_sphere(
                             gpu,

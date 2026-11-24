@@ -135,6 +135,8 @@ impl VolumesWidget {
         volume: &mut VolumeFractionSettings,
         masks: &[VolumeMaskBuffer],
     ) {
+        self.selected_volume = Some(volume.id);
+
         self.transfer.show(ui, volume);
         self.changed |= self.transfer.changed();
 

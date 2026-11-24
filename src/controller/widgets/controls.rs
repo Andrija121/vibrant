@@ -1,6 +1,8 @@
-use egui::{Grid, Slider, Ui};
+use egui::{ComboBox, Grid, Slider, Ui};
 
 use crate::{
+    asset::volume_fraction::VolumeFractionBuffer,
+    asset::volume_mask::VolumeMaskBuffer,
     controller::{components::UIComponents, icons, settings::Settings},
 };
 
@@ -21,7 +23,8 @@ impl ControlsWidget {
         &self,
         ui: &mut Ui,
         settings: &mut Settings,
-        erase_target_name: &str,
+        masks: &[VolumeMaskBuffer],
+        volumes: &[VolumeFractionBuffer],
     ) {
         let erase_open = ui.is_new("Controls.EraseBrush");
         ui.collapse(
@@ -34,14 +37,34 @@ impl ControlsWidget {
                          (Ctrl + Caps Lock to toggle)",
                     );
 
-                ui.add_enabled(
-                    settings.erase_brush,
-                    egui::Label::new(format!("(Mask) Erase target: {erase_target_name}")),
-                )
-                .on_hover_text(
-                    "The brush edits the mask assigned to the active volume in \
-                     the Volumes tab.",
-                );
+                ui.horizontal(|ui| {
+                    ui.label("Erase target");
+                    let selected_text = masks
+                        .get(settings.erase_mask)
+                        .map_or("None", |mask| mask.settings().name.as_str());
+                    ComboBox::from_id_salt("EraseMaskTarget")
+                        .selected_text(selected_text)
+                        .show_ui(ui, |ui| {
+                            for (index, mask) in masks.iter().enumerate() {
+                                let assigned = mask.settings().name == "None"
+                                    || volumes
+                                        .iter()
+                                        .any(|volume| volume.settings().mask == index);
+                                ui.add_enabled_ui(assigned, |ui| {
+                                    ui.selectable_value(
+                                        &mut settings.erase_mask,
+                                        index,
+                                        mask.settings().name.clone(),
+                                    );
+                                });
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Choose any loaded mask edited by the erase brush. This is \
+                             independent of the mask assigned to each volume.",
+                        );
+                });
 
                 // TODO(BRUSH-RADIUS-001): This is a prototype pixel-based
                 // radius. Convert it to 1-20 mm using NIfTI voxel spacing or

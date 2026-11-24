@@ -105,6 +105,8 @@ pub struct Settings {
     pub erase_brush: bool,
     /// brush radius
     pub brush_radius: f32,
+    /// Index of the mask edited independently of volume assignments.
+    pub erase_mask: usize,
     /// Show a fixed center dot at the exact brush position.
     pub show_brush_center_dot: bool,
 }
@@ -153,6 +155,7 @@ impl Settings {
             mirror_fresnel: false,
             erase_brush: false,
             brush_radius: 10.0,
+            erase_mask: 0,
             show_brush_center_dot: true,
         }
     }

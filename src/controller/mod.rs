@@ -143,15 +143,13 @@ impl egui_dock::TabViewer for ControllerTabViewer<'_> {
                 );
             }
             Tab::Controls => {
-                let erase_target_name = self.volumes_widget.erase_target_name(
-                    &self.asset.volumes,
-                    &self.asset.masks,
-                );
-                self.controls_widget.show(
-                    ui,
-                    self.settings,
-                    erase_target_name,
-                );
+                self.controls_widget
+                    .show(
+                        ui,
+                        self.settings,
+                        &self.asset.masks,
+                        &self.asset.volumes,
+                    );
             }
             Tab::Debug => {
                 self.rendering_widget.show_debug(

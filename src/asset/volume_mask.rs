@@ -7,6 +7,29 @@ use wgpu::{util::DeviceExt, wgt::TextureDataOrder, *};
 
 use crate::{file::VolumeFile, gpu::Gpu};
 
+fn resection_mask_data(size: Extent3d) -> Vec<f16> {
+    let total_voxels =
+        (size.width * size.height * size.depth_or_array_layers) as usize;
+    let mut data = vec![f16::from_f32(1.0); total_voxels];
+
+    // Preserve the initial resection: the lower half along the third voxel axis
+    // is excluded, while the upper half remains available.
+    let cut_depth = size.depth_or_array_layers / 2;
+    for z in 0..cut_depth {
+        for y in 0..size.height {
+            for x in 0..size.width {
+                let index =
+                    x as usize
+                        + y as usize * size.width as usize
+                        + z as usize * size.width as usize * size.height as usize;
+                data[index] = f16::from_f32(0.0);
+            }
+        }
+    }
+
+    data
+}
+
 #[derive(Debug, Clone)]
 pub struct VolumeMaskSettings {
     pub name: String,
@@ -77,48 +100,7 @@ impl VolumeMaskBuffer {
             data,
         )
     }
-    pub fn new_resection_mask(gpu: &Gpu, size: Extent3d) -> Self {
-        let label = Some("Resection Mask");
-
-        let total_voxels = (size.width * size.height * size.depth_or_array_layers) as usize;
-        
-        
-        let mut data = vec![1.0f32; total_voxels];
-        for i in 0..(total_voxels / 2) {
-            data[i] = 0.0;
-        }
-
-        let texture = gpu.device().create_texture_with_data(
-            gpu.queue(),
-            &TextureDescriptor {
-                label,
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D3,
-                // Χρησιμοποιούμε R32Float ώστε να υποστηρίζει STORAGE_BINDING για τη βούρτσα αργότερα
-                format: TextureFormat::R32Float,
-                usage: TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::STORAGE_BINDING
-                    | TextureUsages::COPY_DST
-                    | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            },
-            TextureDataOrder::LayerMajor,
-            cast_slice(&data),
-        );
-
-        let settings = VolumeMaskSettings {
-            name: "Resection Mask".to_string(),
-            visible: true,
-            offset: 0.0,
-            width: 0.0,
-            inverted: false,
-            sdf: false,
-        };
-
-        Self::from_texture_settings(texture, settings)
-    }
+   
 
     pub fn size(&self) -> Extent3d {
         self.texture.size()
@@ -158,6 +140,46 @@ impl VolumeMaskBuffer {
             self.data = previous;
             self.upload(gpu);
         }
+    }
+    pub fn new_resection_mask(
+        gpu: &Gpu,
+        size: Extent3d,
+        transform: Mat4,
+        name: String,
+    ) -> Self {
+        let label = Some(name.as_str());
+
+        let data = resection_mask_data(size);
+
+        let texture = gpu.device().create_texture_with_data(
+            gpu.queue(),
+            &TextureDescriptor {
+                label,
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D3,
+                format: TextureFormat::R16Float,
+                usage: TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_DST
+                    | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            },
+            TextureDataOrder::LayerMajor,
+            cast_slice(&data),
+        );
+
+        let settings = VolumeMaskSettings {
+            name,
+            visible: true,
+            offset: 0.0,
+            width: 0.0,
+            inverted: false,
+            sdf: false,
+        };
+
+        let voxel_size = UVec3::new(size.width, size.height, size.depth_or_array_layers);
+        Self::from_texture_settings(texture, settings, voxel_size, transform, data)
     }
 
     /// Finds the first mask voxel intersected by a world-space ray.
@@ -373,5 +395,33 @@ impl VolumeMaskBuffer {
 impl Drop for VolumeMaskBuffer {
     fn drop(&mut self) {
         self.texture.destroy();
+    }
+}
+// Not sure if this is the best place for this test, but it is a good place to start.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resection_mask_cuts_the_lower_half_of_the_third_axis() {
+        let size = Extent3d {
+            width: 4,
+            height: 2,
+            depth_or_array_layers: 4,
+        };
+        let data = resection_mask_data(size);
+
+        for z in 0..4 {
+            for y in 0..2 {
+                for x in 0..4 {
+                    let index =
+                        x as usize
+                            + y as usize * size.width as usize
+                            + z as usize * size.width as usize * size.height as usize;
+                    let expected = if z < 2 { 0.0 } else { 1.0 };
+                    assert_eq!(data[index].to_f32(), expected);
+                }
+            }
+        }
     }
 }
