@@ -12,6 +12,7 @@ use crate::{
 #[derive(Debug)]
 pub struct MasksWidget {
     changed: bool,
+    create_requested: bool,
 }
 
 impl Tracked for MasksWidget {
@@ -20,18 +21,49 @@ impl Tracked for MasksWidget {
     }
 }
 
+/*
 impl Default for MasksWidget {
     fn default() -> Self {
         Self::new()
     }
 }
+*/
+//new code
+impl Default for MasksWidget {
+    fn default() -> Self {
+        Self {
+            changed: false,
+            create_requested: false,
+        }
+    }
+}
 
+//edited
 impl MasksWidget {
     pub fn new() -> Self {
-        Self { changed: false }
+        Self { changed: false, create_requested: false }
+    }
+    pub fn take_create_requested(&mut self) -> bool {
+        std::mem::take(&mut self.create_requested)
     }
 
+    /*
+    impl MasksWidget {
+        pub fn new() -> Self {
+            Self { changed: false }
+        }
+    */
+
     pub fn show(&mut self, ui: &mut Ui, masks: &mut [VolumeMaskBuffer]) {
+
+        //new code
+        if ui.button("➕ Create Empty Mask").clicked() {
+            self.create_requested = true;
+            self.changed = true;
+        }
+
+        ui.separator();
+
         let mut masks = masks
             .iter_mut()
             .filter(|mask| mask.settings().name != "None")
@@ -85,14 +117,14 @@ impl MasksWidget {
                  inward, positive values dilate outward.",
             );
 
-            ui.slider(&mut mask.offset, -1.0..=1.0, false).track(self);
+            ui.slider(&mut mask.offset, -1.0..=1.0).track(self);
             ui.end_row();
 
             ui.label("Smoothing").on_hover_text(
                 "Softness of the mask edge. Higher values fade the boundary \
                  over a wider band instead of a hard cut.",
             );
-            ui.slider(&mut mask.width, 0.1..=1.0, false).track(self);
+            ui.slider(&mut mask.width, 0.1..=1.0).track(self);
             ui.end_row();
         });
     }

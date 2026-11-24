@@ -117,9 +117,9 @@ impl Camera {
         if self.orthographic() {
             let h = self.extent();
             let w = h * self.aspect;
-            glam::camera::lh::proj::directx::orthographic(-w, w, -h, h, -far, far)
+            Mat4::orthographic_lh(-w, w, -h, h, -far, far)
         } else {
-            glam::camera::lh::proj::directx::perspective(self.fov, self.aspect, self.near, far)
+            Mat4::perspective_lh(self.fov, self.aspect, self.near, far)
         }
     }
 

@@ -76,27 +76,26 @@ impl CropWidget {
                             "Direction the spherical cut faces, rotating around \
                              the vertical axis.",
                         );
-                        ui.slider(&mut s.spherical.x, 0.0..=2.0 * PI, false)
-                            .track(self);
+                        ui.slider(&mut s.spherical.x, 0.0..=2.0 * PI).track(self);
                         ui.end_row();
 
                         ui.label("Elevation").on_hover_text(
                             "Tilt of the spherical cut, from below the scene to \
                              above it.",
                         );
-                        ui.slider(&mut s.spherical.y, 0.0..=PI, false).track(self);
+                        ui.slider(&mut s.spherical.y, 0.0..=PI).track(self);
                         ui.end_row();
 
                         ui.label("Depth")
                             .on_hover_text("How far the spherical cut reaches into the scene.");
-                        ui.slider(&mut s.spherical.z, 0.0..=1.0, false).track(self);
+                        ui.slider(&mut s.spherical.z, 0.0..=1.0).track(self);
                         ui.end_row();
 
                         ui.label("Smooth").on_hover_text(
                             "Softness of the spherical cut's edge, from a hard \
                              boundary to a wide fade.",
                         );
-                        ui.slider(&mut s.spherical.w, 0.0..=1.0, false).track(self);
+                        ui.slider(&mut s.spherical.w, 0.0..=1.0).track(self);
                         ui.end_row();
                     });
             },
@@ -110,17 +109,13 @@ impl CropWidget {
             label.to_lowercase(),
         ));
 
-        // DoubleSlider marks changed on every dragged frame, even when still.
-        let before = (*min, *max);
         ui.add(
             DoubleSlider::new(min, max, -0.5..=0.5)
                 .control_point_radius(5.0)
                 .width(ui.available_width())
                 .separation_distance(0.001),
-        );
-        if (*min, *max) != before {
-            self.track();
-        }
+        )
+        .track(self);
 
         ui.end_row();
     }

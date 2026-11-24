@@ -336,11 +336,8 @@ impl TransferFunctionEditor {
 
         if response.dragged() {
             let delta = response.drag_delta().x / histogram_rect.width();
-            let position = (node.position + delta).clamp(0.0, 1.0);
-            if position != node.position {
-                node.position = position;
-                self.changed = true;
-            }
+            node.position = (node.position + delta).clamp(0.0, 1.0);
+            self.changed = true;
         }
 
         let x = histogram_rect.min.x + node.position * histogram_rect.width();
@@ -448,8 +445,7 @@ impl TransferFunctionEditor {
                                      light more at boundaries, for a denser, \
                                      more glass-like look.",
                                     );
-                                    ui.slider(&mut node.material.ior, 1.0..=5.0, false)
-                                        .track(self);
+                                    ui.slider(&mut node.material.ior, 1.0..=5.0).track(self);
                                     ui.end_row();
                                 });
                         });

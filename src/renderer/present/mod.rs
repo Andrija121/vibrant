@@ -19,8 +19,7 @@ use crate::{
 struct PresentUniform {
     headroom: f32,
     exposure: f32,
-    blur: f32,
-    _pad: f32,
+    _pad: [f32; 2],
 }
 
 /// How the swapchain wants its pixels, picked from surface capabilities.
@@ -127,18 +126,16 @@ impl PresentPipeline {
             })
     }
 
-    /// Primes the per-frame tone-map headroom and the number of samples in the
-    /// scene in the shared uniform. Call before [`Self::dispatch`] /
-    /// [`Self::export`] (mirrors `AccumulateBuffer::set_sample`).
-    pub fn set_uniform(&self, gpu: &Gpu, headroom: f32, samples: u32) {
+    /// Primes the per-frame tone-map headroom in the shared uniform. Call before
+    /// [`Self::dispatch`] / [`Self::export`] (mirrors `AccumulateBuffer::set_sample`).
+    pub fn set_headroom(&self, gpu: &Gpu, headroom: f32) {
         gpu.queue().write_buffer(
             &self.uniform,
             0,
             bytemuck::bytes_of(&PresentUniform {
                 headroom,
                 exposure: 1.0,
-                blur: 1.0 / samples.max(1) as f32,
-                _pad: 0.0,
+                _pad: [0.0; 2],
             }),
         );
     }

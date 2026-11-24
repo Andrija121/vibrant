@@ -2,10 +2,9 @@
 // Roots declare `ENVIRONMENT` and `BLUE_NOISE: texture_3d<f32>`.
 use random;
 
-// Must match `BlueNoise`
-const BLUE_NOISE_SIZE: u32 = 22u;
-const BLUE_NOISE_DEPTH: u32 = 32u;
-const BLUE_NOISE_VARIANTS: u32 = 4u;
+// R4 sequence (Roberts): per-step rotation, low discrepancy along the ray.
+const R4 = vec4<f32>(0.8566748838545029, 0.733891856627126, 0.6287067210378086, 0.53859725722361);
+
 const U24_TO_UNIT: f32 = 5.960464477539063e-8;
 
 // Four independent [0, 1) values. Distinct `dimension`s are uncorrelated.
@@ -14,20 +13,22 @@ fn noise(pixel: vec2<u32>, dimension: u32) -> vec4<f32> {
         return white_noise(vec3<u32>(pixel, ENVIRONMENT.sample ^ (dimension << 24u)));
     }
 
-    // One slice per sample. The screen is a checkerboard of cells, each showing
-    // one of its colour's variants by hash; the variants are baked to stay blue
-    // across cell edges (blue_noise.py). Each dimension and pass through the
-    // slices shifts the board and rehashes it.
-    let hash = pcg3d(vec3<u32>(ENVIRONMENT.sample / BLUE_NOISE_DEPTH, dimension, 0u));
-
-    let p = pixel + (hash.xy & vec2<u32>(0xffffu));
-    let cell = p / BLUE_NOISE_SIZE;
-    let colour = (cell.x + cell.y) & 1u;
-    let variant = pcg3d(vec3<u32>(cell, hash.z)).x % BLUE_NOISE_VARIANTS;
-    let layer = (colour * BLUE_NOISE_VARIANTS + variant) * BLUE_NOISE_DEPTH + ENVIRONMENT.sample % BLUE_NOISE_DEPTH;
-    let texel = vec3<u32>(p % BLUE_NOISE_SIZE, layer);
+    // One slice per sample; each dimension and each pass through the slices
+    // reads a randomly shifted tile.
+    let size = textureDimensions(BLUE_NOISE);
+    let shift = pcg3d(vec3<u32>(ENVIRONMENT.sample / size.z, dimension, 0x5bd1e995u)).xy;
+    let texel = vec3<u32>((pixel + shift) % size.xy, ENVIRONMENT.sample % size.z);
 
     return (textureLoad(BLUE_NOISE, texel, 0) * 255.0 + 0.5) / 256.0;
+}
+
+// `u` for ray step `step`: rotated (blue) or redrawn (white).
+fn advance(u: vec4<f32>, step: u32) -> vec4<f32> {
+    if (ENVIRONMENT.noise == 0u) {
+        return white_noise(bitcast<vec3<u32>>(u.xyz) ^ vec3<u32>(step));
+    }
+
+    return fract(u + R4 * f32(step));
 }
 
 fn white_noise(seed: vec3<u32>) -> vec4<f32> {

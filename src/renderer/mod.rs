@@ -1,4 +1,5 @@
 pub mod accumulate;
+pub mod gradient;
 pub mod lighting;
 pub mod line;
 pub mod present;
@@ -11,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::renderer::{
-    lighting::LightingRenderer, line::LineRenderer, util::clear::ClearPipeline,
-    volume::VolumeRenderer,
+    gradient::GradientPipeline, lighting::LightingRenderer, line::LineRenderer,
+    util::clear::ClearPipeline, volume::VolumeRenderer,
 };
 use ui::UiRenderer;
 use wgpu::RenderPassDescriptor;
@@ -44,6 +45,7 @@ pub struct Renderer {
 
     clear: ClearPipeline,
     volume: VolumeRenderer,
+    gradient: GradientPipeline,
     lighting: LightingRenderer,
     line: LineRenderer,
     ui: UiRenderer,
@@ -60,6 +62,7 @@ impl Renderer {
             clear: ClearPipeline::new(gpu),
 
             volume: VolumeRenderer::new(gpu),
+            gradient: GradientPipeline::new(gpu),
             lighting: LightingRenderer::new(gpu),
             line: LineRenderer::new(gpu),
 
@@ -82,6 +85,7 @@ impl Renderer {
         let repaint_after = self.ui.run(gpu, window, |ui| {
             controller.ui(
                 ui,
+                gpu,    //new line
                 &mut self.asset,
                 window.scale_factor() as f32,
                 self.surface
@@ -101,9 +105,7 @@ impl Renderer {
             self.asset.changed() | controller.lighting_changed() | controller.take_camera_changed();
 
         let settings = *controller.settings();
-        let plan =
-            self.surface
-                .plan_accumulation(&settings, scene_dirty, controller.traced_changed());
+        let plan = self.surface.plan_accumulation(&settings, scene_dirty);
 
         self.asset
             .environment
@@ -126,24 +128,19 @@ impl Renderer {
 
                 let combined = settings.render_mode == RenderMode::Combined;
 
-                let volume_changed = self.asset.changed() || controller.volume_changed();
-                let line_changed = self.asset.changed() || controller.line_changed();
-                let lighting_changed =
-                    volume_changed || line_changed || controller.light().changed();
+                let data_changed = self.asset.changed() || controller.changed();
+                let lighting_changed = data_changed || controller.light().changed();
 
-                // Occupancy pyramid first: the line deposit samples it.
-                if line_changed {
+                if data_changed {
+                    // Occupancy pyramid first: the line deposit samples it.
                     self.line.transfer(&mut cmd, controller, &self.asset);
-                }
 
-                if self.asset.physical_volume.is_some() {
-                    // Transfer functions -> lookup tables, occupancy, extinction.
-                    if volume_changed {
-                        self.volume.transfer(gpu, &mut cmd, &self.asset);
-                    }
-                    // Neutral line density -> `pv.line_extinction` (a
-                    // separate texture the cascades and traced shadow rays read).
-                    if line_changed {
+                    if let Some(pv) = &self.asset.physical_volume {
+                        // Volume fractions -> the marched textures (line-free).
+                        self.volume.transfer(&mut cmd, &self.asset, pv);
+                        self.gradient.dispatch(&mut cmd, pv);
+                        // Neutral line density -> `pv.line_extinction` (a
+                        // separate texture the volume tracer never reads).
                         self.line.deposit(&mut cmd, controller, &self.asset);
                     }
                 }

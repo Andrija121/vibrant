@@ -239,12 +239,7 @@ impl Gpu {
                 layout: Some(layout),
                 module,
                 entry_point: None,
-                // Our compute shaders write workgroup memory before reading it,
-                // and the zero fill costs ~5 ms at cascade 0.
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    zero_initialize_workgroup_memory: false,
-                    ..Default::default()
-                },
+                compilation_options: Default::default(),
                 cache: None,
             })
     }

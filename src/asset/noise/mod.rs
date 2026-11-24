@@ -7,17 +7,15 @@ use wgpu::{
 
 use crate::gpu::Gpu;
 
-/// Seamless spatiotemporal blue noise cells, one slice per sample, four independent channels (see `blue_noise.py`).
+/// Tiling spatiotemporal blue noise, one slice per sample, four independent channels (see `blue_noise.py`).
 pub struct BlueNoise {
     texture: Texture,
     view: TextureView,
 }
 
 impl BlueNoise {
-    // Mirrored as constants in noise.wgsl.
-    const SIZE: u32 = 22;
-    // 2 colours × 4 variants × 32 slices.
-    const DEPTH: u32 = 8 * 32;
+    const SIZE: u32 = 64;
+    const DEPTH: u32 = 32;
 
     pub fn new(gpu: &Gpu) -> Self {
         let label = Some(type_name::<Self>());

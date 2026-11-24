@@ -149,7 +149,6 @@ pub struct VolumeFractionSettingsBuffer {
 
 pub struct VolumeFractionBuffer {
     texture: Texture,
-    view: TextureView,
     size: UVec3,
 
     transform: Mat4,
@@ -186,8 +185,6 @@ impl VolumeFractionBuffer {
             TextureDataOrder::LayerMajor,
             cast_slice(file.data()),
         );
-
-        let view = texture.create_view(&TextureViewDescriptor::default());
 
         let sampler = gpu.device().create_sampler(&SamplerDescriptor {
             label,
@@ -257,7 +254,9 @@ impl VolumeFractionBuffer {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: BindingResource::TextureView(&view),
+                    resource: BindingResource::TextureView(
+                        &texture.create_view(&TextureViewDescriptor::default()),
+                    ),
                 },
                 BindGroupEntry {
                     binding: 1,
@@ -284,7 +283,6 @@ impl VolumeFractionBuffer {
 
         Self {
             texture,
-            view,
             size: file.size(),
             transform,
             transform_buffer,
@@ -296,10 +294,6 @@ impl VolumeFractionBuffer {
 
     pub fn size(&self) -> UVec3 {
         self.size
-    }
-
-    pub fn view(&self) -> &TextureView {
-        &self.view
     }
 
     pub fn binding(&self) -> &BindGroup {

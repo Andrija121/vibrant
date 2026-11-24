@@ -25,7 +25,7 @@ use crate::controller::widgets::{
     crop::CropWidget, masks::MasksWidget, rendering::RenderingWidget,
     tractography::TractographyWidget, volumes::VolumesWidget,
 };
-use crate::{asset::Asset, file::FileStage, gpu::warmup, surface::accumulate::AccumulationStatus};
+use crate::{asset::Asset, file::FileStage, gpu::{warmup, Gpu}, surface::accumulate::AccumulationStatus}; //gpu::{warmup, Gpu}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 enum Tab {
@@ -269,6 +269,7 @@ impl Controller {
     pub fn ui(
         &mut self,
         ui: &mut Ui,
+        gpu: &Gpu,  //new line
         asset: &mut Asset,
         scale: f32,
         hdr_headroom_limit: Option<f32>,
@@ -362,6 +363,27 @@ impl Controller {
                     .show_inside(ui, &mut viewer);
             });
 
+        //new code
+        if self.mask_widget.take_create_requested() {
+            let mut index = 1;
+
+            let name = loop {
+                let candidate = format!("Empty mask {index}");
+
+                if !asset
+                    .masks
+                    .iter()
+                    .any(|mask| mask.settings().name == candidate)
+                {
+                    break candidate;
+                }
+
+                index += 1;
+            };
+
+            asset.create_empty_mask(gpu, name);
+        }
+
         let viewport = CentralPanel::no_frame().show(ui, |ui| {
             if asset.volumes.is_empty() && asset.line.is_none() && !FileStage::loading() {
                 ui.painter().text(
@@ -434,24 +456,6 @@ impl Controller {
 
     pub fn lighting_changed(&self) -> bool {
         self.changed() || self.light().changed()
-    }
-
-    /// Edits that invalidate the volume's transfer bake.
-    pub fn volume_changed(&self) -> bool {
-        self.crop().changed()
-            || self.volumes().changed()
-            || self.masks().changed()
-            || self.rendering().changed()
-    }
-
-    /// Edits that invalidate the line acceleration structure and deposit.
-    pub fn line_changed(&self) -> bool {
-        self.crop().changed() || self.tractography().changed() || self.rendering().changed()
-    }
-
-    /// Edits that only invalidate the ray traced image.
-    pub fn traced_changed(&self) -> bool {
-        self.rendering().traced_changed()
     }
 
     pub fn changed(&self) -> bool {

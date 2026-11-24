@@ -14,12 +14,18 @@ use uniforms;
 @group(0) @binding(8) var<uniform> CASCADE_OPTS: CascadeOpts;
 @group(0) @binding(9) var WEIGHTS_OUT: texture_storage_3d<rgba8unorm, write>;
 
+// Diagnostic Histogram
+@group(0) @binding(7) var<storage, read_write> EM_ITERATIONS: array<atomic<u32>>;
+
 @group(1) @binding(2) var EXTINCTION: texture_3d<f32>;
+@group(1) @binding(3) var PROPERTIES: texture_3d<f32>;
+@group(1) @binding(4) var GRADIENT: texture_3d<f32>;
 @group(1) @binding(5) var SAMPLER: sampler;
 
 @group(1) @binding(8) var LINE_EXTINCTION: texture_3d<f32>;
 @group(1) @binding(9) var LINE_EXTINCTION_SAMPLER: sampler;
 @group(1) @binding(6) var<uniform> TRANSFORM: mat4x4<f32>;
+@group(1) @binding(7) var<uniform> TRANSFORM_INVERSE: mat4x4<f32>;
 
 @group(2) @binding(0) var<uniform> ENVIRONMENT: Environment;
 
@@ -38,31 +44,19 @@ use uniforms;
 
 const CASCADE_MAX: u32 = 5u;
 const WORKGROUP: u32 = 32u;
-
 const SAMPLES: u32 = WORKGROUP * SAMPLES_PER_THREAD;
 
-// Every probe takes the cheapest of:
-// - EMPTY: no extinction within EMPTY_MARGIN cells. Never read, so it writes
-//   nothing: the renderer reads up to LOOKUP_JITTER (2) + 1 cells from what
-//   it shades, and a child sits within one parent cell of its parents.
-// - COPY: stores the parent's lobes. Either no neighbour has LOCAL_MATTER
-//   optical depth across a probe cell, so nothing nearby blocks the parent's
-//   light, or every parent within IRRADIANCE_MARGIN cells of the probe's
-//   interpolation footprint sees less mean radiance (Σ E / 4π) than
-//   IRRADIANCE_CULL of the sky's: a child can be lit where its own parent
-//   isn't, e.g. just inside a cut. A copy, not zero: a parent buried in matter
-//   is dark while its children outside are lit.
-// - SOLVE: traces and fits.
-const EMPTY_MARGIN: f32 = 4.0;
-const IRRADIANCE_CULL: f32 = 0.01;
-const IRRADIANCE_MARGIN: i32 = 1;
-const LOCAL_MATTER: f32 = 1e-3;
+// Probes whose parent sees less mean radiance (Σ E / 4π) than this are culled.
+const IRRADIANCE_CULL: f32 = 0.0016;
+
+// A uniform sample covers a solid angle of 4π / SAMPLES ≈ π tan²θ, an
+// importance sample that times its density ratio.
+const CONE_TAN: f32 = 2.0 / sqrt(f32(SAMPLES));
 
 // How much of each parent lobe the prefiltered samples pick up together.
 var<workgroup> PICKUP: array<f32, VMM_MAX>;
 
 var<workgroup> CULL_OCCUPIED: atomic<u32>;
-var<workgroup> CULL_LIT: atomic<u32>;
 var<workgroup> CULL_RESULT: u32;
 
 const CULL_NEIGHBORS: u32 = 6u;
@@ -82,6 +76,10 @@ fn vmm_size() -> u32 {
     return VMM_MAX;
 }
 
+fn em_histogram_row() -> u32 {
+    return cascade();
+}
+
 // Luminance, like the environment's cells. Log compression keeps bright
 // sources from claiming every lobe.
 fn radiance_weight(radiance: vec3<f32>) -> f32 {
@@ -99,24 +97,16 @@ fn main(
     @builtin(num_subgroups) subgroups: u32,
 ) {
     let thread = Thread(index, subgroup, lane, subgroups);
-    let origin = (vec3<f32>(probe) + 0.5) * f32(1u << cascade());
-
-    if (is_empty(origin, thread)) { return; }
-
-    let copy = copies_parent(origin, thread);
-
     if (thread.index < vmm_size()) { initialize_lobe(probe, thread.index); }
 
     workgroupBarrier();
 
-    if (copy) {
-        if (thread.index < vmm_size()) { store_lobe(probe, thread.index); }
+    let origin = (vec3<f32>(probe) + 0.5) * f32(1u << cascade());
 
-        if (cascade() == 0u) {
-            store_phase(probe, thread);
-        } else if (thread.index == 0u) {
-            store_irradiance(probe);
-        }
+    if (is_culled(origin, thread)) {
+        if (thread.index < vmm_size()) { store_lobe(probe, thread.index); }
+        if (thread.index == 0u) { record_iterations(0); }
+        if (cascade() == 0u) { store_phase(probe, thread); }
         return;
     }
 
@@ -136,32 +126,7 @@ fn main(
     }
 }
 
-// Eight lookups, each at a mip whose texels span half the margin box, so
-// together they see every voxel within EMPTY_MARGIN cells.
-fn is_empty(origin: vec3<f32>, thread: Thread) -> bool {
-    let dim = vec3<f32>(probe_grid(textureDimensions(VMM_OUT))) * f32(1u << cascade());
-    let cell_sample = f32(1u << cascade()) / dim;
-    let radiance_scale = f32(textureDimensions(EXTINCTION).x) / dim.x;
-    let mip = ceil(log2((EMPTY_MARGIN + 0.5) * f32(1u << cascade()) * radiance_scale));
-
-    if (thread.index == 0u) { atomicStore(&CULL_OCCUPIED, 0u); }
-
-    workgroupBarrier();
-
-    if (thread.index < 8u) {
-        let corner = vec3<f32>(vec3<u32>(thread.index & 1u, (thread.index >> 1u) & 1u, thread.index >> 2u)) * 2.0 - 1.0;
-        let sample = (origin + corner * 0.5 * EMPTY_MARGIN * f32(1u << cascade())) / dim;
-        if (any(extinction_at(sample, mip, 1.0) > vec3<f32>(0.0))) { atomicOr(&CULL_OCCUPIED, 1u); }
-    }
-
-    workgroupBarrier();
-
-    if (thread.index == 0u) { CULL_RESULT = select(0u, 1u, atomicLoad(&CULL_OCCUPIED) == 0u); }
-
-    return workgroupUniformLoad(&CULL_RESULT) != 0u;
-}
-
-fn copies_parent(origin: vec3<f32>, thread: Thread) -> bool {
+fn is_culled(origin: vec3<f32>, thread: Thread) -> bool {
     let dim = vec3<f32>(probe_grid(textureDimensions(VMM_OUT))) * f32(1u << cascade());
     let origin_sample = origin / dim;
     let cell_sample = f32(1u << cascade()) / dim;
@@ -169,52 +134,27 @@ fn copies_parent(origin: vec3<f32>, thread: Thread) -> bool {
     let radiance_scale = f32(textureDimensions(EXTINCTION).x) / dim.x;
     let mip = f32(cascade()) + log2(radiance_scale);
 
-    if (thread.index == 0u) {
-        atomicStore(&CULL_OCCUPIED, 0u);
-        atomicStore(&CULL_LIT, 0u);
-    }
+    if (thread.index == 0u) { atomicStore(&CULL_OCCUPIED, 0u); }
 
     workgroupBarrier();
 
     if (thread.index < CULL_NEIGHBORS) {
         let sample = origin_sample + NEIGHBOR_OFFSET[thread.index] * cell_sample;
-        let depth = extinction_at(sample, mip, cell_mm());
-        if (any(depth > vec3<f32>(LOCAL_MATTER))) { atomicOr(&CULL_OCCUPIED, 1u); }
+        let extinction = extinction_at(sample, mip, 1.0);
+        if (any(extinction > vec3<f32>(EPSILON))) { atomicOr(&CULL_OCCUPIED, 1u); }
     }
-
-    if (cascade() < CASCADE_MAX) { find_lit_parent(origin_sample, thread); }
 
     workgroupBarrier();
 
-    if (thread.index == 0u) {
-        let lit = cascade() == CASCADE_MAX || atomicLoad(&CULL_LIT) != 0u;
-        CULL_RESULT = select(0u, 1u, atomicLoad(&CULL_OCCUPIED) == 0u || !lit);
+    var result = atomicLoad(&CULL_OCCUPIED) == 0u;
+    if (!result && cascade() < CASCADE_MAX) {
+        let irradiance = unpack_rgb(textureSampleLevel(IRRADIANCE_IN, SAMPLER, origin_sample, 0.0));
+        result = brightness(irradiance) < IRRADIANCE_CULL;
     }
+
+    if (thread.index == 0u) { CULL_RESULT = select(0u, 1u, result); }
 
     return workgroupUniformLoad(&CULL_RESULT) != 0u;
-}
-
-// Flags CULL_LIT if any parent in the trilinear footprint at `uv`, widened by
-// IRRADIANCE_MARGIN, has at least IRRADIANCE_CULL of the sky's mean radiance.
-fn find_lit_parent(uv: vec3<f32>, thread: Thread) {
-    let parents = vec3<i32>(textureDimensions(IRRADIANCE_IN));
-    let lo = vec3<i32>(floor(uv * vec3<f32>(parents) - 0.5)) - IRRADIANCE_MARGIN;
-    let width = u32(2 + 2 * IRRADIANCE_MARGIN);
-
-    // Environments are normalized to mean luminance 1 at unit strength.
-    let threshold = IRRADIANCE_CULL * HDRI_SETTINGS.strength;
-
-    for (var i = thread.index; i < width * width * width; i += WORKGROUP) {
-        let offset = vec3<i32>(vec3<u32>(i % width, (i / width) % width, i / (width * width)));
-        let parent = clamp(lo + offset, vec3<i32>(0), parents - 1);
-        if (brightness(textureLoad(IRRADIANCE_IN, parent, 0).rgb) >= threshold) { atomicOr(&CULL_LIT, 1u); }
-    }
-}
-
-// This level's probe spacing in mm.
-fn cell_mm() -> f32 {
-    let dim = vec3<f32>(probe_grid(textureDimensions(VMM_OUT))) * f32(1u << cascade());
-    return f32(1u << cascade()) / length(dim * (linear_part(TRANSFORM) * vec3<f32>(1.0, 0.0, 0.0)));
 }
 
 fn initialize_lobe(probe: vec3<u32>, k: u32) {
@@ -314,7 +254,7 @@ fn store_irradiance(probe: vec3<u32>) {
         energy += PHI[k].rgb;
     }
 
-    textureStore(IRRADIANCE_OUT, probe, vec4<f32>(energy / (4.0 * PI), 1.0));
+    textureStore(IRRADIANCE_OUT, probe, pack_rgb(energy / (4.0 * PI)));
 }
 
 fn incident_radiance(origin: vec3<f32>, omega: Directions, ratio: Weights, thread: Thread) -> Radiances {
@@ -326,7 +266,7 @@ fn incident_radiance(origin: vec3<f32>, omega: Directions, ratio: Weights, threa
         radiance = parent_radiance(omega);
     }
 
-    return hadamard(radiance, trace_samples(origin, omega));
+    return hadamard(radiance, trace_samples(origin, omega, ratio));
 }
 
 // The parent's lobes as a soft partition of the sphere: each direction takes
@@ -391,15 +331,14 @@ fn footprint(k: u32, omega: Directions, kappa_s: Weights) -> Weights {
 
 // Interval [2^(c+1) − 2, 2^(c+2) − 2) in probe cells: contiguous from 0, each
 // twice its level's probe spacing.
-fn trace(origin: vec3<f32>, direction: vec3<f32>) -> vec3<f32> {
+fn trace(origin: vec3<f32>, direction: vec3<f32>, ratio: f32) -> vec3<f32> {
     let c = cascade();
-    return transmission(origin, direction, f32((2u << c) - 2u), f32((4u << c) - 2u));
+    return transmission(origin, direction, CONE_TAN * sqrt(ratio), f32((2u << c) - 2u), f32((4u << c) - 2u));
 }
 
-// Marches the world `direction` a voxel at a time at full resolution; t and
-// the interval are in probe cells. Cones through the mips averaged gaps in the
-// matter away, and exp(−mean σ) ≤ mean exp(−σ): far too dark.
-fn transmission(origin: vec3<f32>, direction: vec3<f32>, t0: f32, t1: f32) -> vec3<f32> {
+// Marches the world `direction` in probe cells: t, the interval and the cone are
+// in cells.
+fn transmission(origin: vec3<f32>, direction: vec3<f32>, cone_tan: f32, t0: f32, t1: f32) -> vec3<f32> {
     var transmission = vec3<f32>(1.0);
 
     let dim = vec3<f32>(probe_grid(textureDimensions(VMM_OUT))) * f32(1u << cascade());
@@ -415,12 +354,13 @@ fn transmission(origin: vec3<f32>, direction: vec3<f32>, t0: f32, t1: f32) -> ve
     var t = t0;
 
     while (t < t1) {
-        let step = min(voxel, t1 - t);
+        let diameter = max(2.0 * cone_tan * t, voxel);
+        let step = min(diameter, t1 - t);
         let sample = origin_sample + direction_sample * (t + 0.5 * step);
 
         if (any(abs(sample - 0.5) > vec3<f32>(0.5))) { break; }
 
-        let depth = extinction_at(sample, 0.0, step / scale);
+        let depth = extinction_at(sample, log2(diameter / voxel), step / scale);
 
         transmission *= exp(-depth);
 
@@ -437,7 +377,7 @@ fn transmission(origin: vec3<f32>, direction: vec3<f32>, t0: f32, t1: f32) -> ve
 fn extinction_at(uv: vec3<f32>, mip: f32, segment: f32) -> vec3<f32> {
     var e = vec3<f32>(0.0);
     if (CASCADE_OPTS.include_volume != 0u) {
-        e += segment * textureSampleLevel(EXTINCTION, SAMPLER, uv, mip).rgb;
+        e += segment * unpack_rgb(textureSampleLevel(EXTINCTION, SAMPLER, uv, mip));
     }
     if (CASCADE_OPTS.include_lines != 0u) {
         e += vec3<f32>(segment * textureSampleLevel(LINE_EXTINCTION, LINE_EXTINCTION_SAMPLER, uv, mip).x);

@@ -18,7 +18,7 @@ use environment::Environment;
 use glam::{Mat4, UVec3};
 use line::LineBuffer;
 use tractography::Tractography;
-use volume::{PhysicalVolume, SLOTS};
+use volume::PhysicalVolume;
 
 use crate::{
     asset::{
@@ -30,6 +30,8 @@ use crate::{
     gpu::Gpu,
 };
 
+use wgpu::Extent3d;     // add mask to application
+
 pub struct Asset {
     pub colormap: Colormap,
     pub environment: Environment,
@@ -40,9 +42,9 @@ pub struct Asset {
     pub line: Option<LineBuffer>,
     pub volumes: Vec<VolumeFractionBuffer>,
     pub masks: Vec<VolumeMaskBuffer>,
-    // The single shared medium: transfer-function tables + baked extinction
-    // for the cascades, plus a `line_extinction` side texture the line deposit
-    // fills. Allocated whenever a volume OR a line is loaded.
+    // The single shared medium: volume density in the sampled textures (marched
+    // by the volume renderer), plus a `line_extinction` side texture the line
+    // deposit fills. Allocated whenever a volume OR a line is loaded.
     pub physical_volume: Option<PhysicalVolume>,
     // Primary cascade. Combined: occlusion = volume + lines, sampled by both
     // renderers. Overlay: occlusion = volume only, sampled by the volume renderer.
@@ -89,6 +91,45 @@ impl Asset {
             changed: false,
         }
     }
+
+    // new fn
+    //adding mask to application
+    pub fn create_empty_mask(&mut self, gpu: &Gpu, name: String) -> bool {
+        // Find the largest loaded brain volume.
+        let Some(volume) = self
+            .volumes
+            .iter()
+            .max_by_key(|volume| volume.size().element_product())
+        else {
+            // Cannot create a correctly sized mask without a brain volume.
+            return false;
+        };
+
+        // Use the brain volume's dimensions for the mask.
+        let volume_size = volume.size();
+        if volume_size.min_element() == 0 {
+            return false;
+        }
+        
+        let size = Extent3d {
+            width: volume_size.x,
+            height: volume_size.y,
+            depth_or_array_layers: volume_size.z,
+        };
+
+        // Create the empty mask.
+        let mask = VolumeMaskBuffer::empty(gpu, size, name);
+
+        // Add it to the application's mask collection.
+        self.masks.push(mask);
+
+        // Notify the application that the assets have changed.
+        self.changed = true;
+
+        true
+    }
+
+
 
     pub fn update(&mut self, gpu: &Gpu, controller: &mut Controller) {
         self.changed = false;
@@ -195,6 +236,9 @@ impl Asset {
         }
         for volume in &self.volumes {
             volume.update_settings(gpu);
+        }
+        for mask in &self.masks {
+            mask.update_settings(gpu);
         }
 
         // Rebuild the tractography acceleration structure when the voxel
@@ -323,14 +367,5 @@ impl Asset {
 
     pub fn changed(&self) -> bool {
         self.changed
-    }
-
-    /// The fractions the volume is classified from, at most [`SLOTS`].
-    pub fn visible_volumes(&self) -> Vec<&VolumeFractionBuffer> {
-        self.volumes
-            .iter()
-            .filter(|volume| volume.settings().visible)
-            .take(SLOTS)
-            .collect()
     }
 }

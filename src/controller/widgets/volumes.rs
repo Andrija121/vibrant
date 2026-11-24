@@ -113,7 +113,7 @@ impl VolumesWidget {
                      so you can fade a volume in or out without re-editing \
                      every stop.",
                 );
-                ui.slider(&mut volume.opacity, 0.01..=1.0, true).track(self);
+                ui.slider(&mut volume.opacity, 0.0..=1.0).track(self);
                 ui.end_row();
 
                 ui.label("Mask").on_hover_text(

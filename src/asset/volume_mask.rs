@@ -1,7 +1,11 @@
 use std::any::type_name;
 
-use bytemuck::{bytes_of, checked::cast_slice};
-use wgpu::{util::DeviceExt, wgt::TextureDataOrder, *};
+use bytemuck::{bytes_of, checked::cast_slice, Pod, Zeroable};
+use wgpu::{
+    util::{BufferInitDescriptor, DeviceExt},
+    wgt::TextureDataOrder,
+    *,
+};
 
 use crate::{file::VolumeFile, gpu::Gpu};
 
@@ -15,11 +19,35 @@ pub struct VolumeMaskSettings {
     pub width: f32,
 }
 
+impl VolumeMaskSettings {
+    fn to_buffer(&self) -> VolumeMaskSettingsBuffer {
+        VolumeMaskSettingsBuffer {
+            visible: self.visible as u32,
+            invert: self.inverted as u32,
+            sdf: self.sdf as u32,
+            offset: self.offset,
+            width: self.width,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct VolumeMaskSettingsBuffer {
+    visible: u32,
+    invert: u32,
+    sdf: u32,
+    offset: f32,
+    width: f32,
+}
+
 pub struct VolumeMaskBuffer {
     texture: Texture,
-    view: TextureView,
 
     settings: VolumeMaskSettings,
+    settings_buffer: Buffer,
+
+    binding: BindGroup,
 }
 
 impl VolumeMaskBuffer {
@@ -57,19 +85,108 @@ impl VolumeMaskBuffer {
             sdf: file.is_signed(),
         };
 
-        Self::from_texture_settings(texture, settings)
+        Self::from_texture_settings(gpu, texture, settings)
     }
+
+    // New function
+    // creating empty mask
+    pub fn empty(gpu: &Gpu, size: Extent3d, name: String) -> Self {
+        let label = Some(type_name::<Self>());
+
+        // Each voxel in an R16Float texture occupies 2 bytes.
+        // Initialize every voxel to 1.0 (preserve the entire volume).
+        let voxel_count = size.width as usize
+            * size.height as usize
+            * size.depth_or_array_layers as usize;
+
+        // 1.0 in IEEE 754 half-precision (R16Float) format.
+        let one = 0x3C00u16.to_le_bytes();
+        let data = one.repeat(voxel_count);
+
+        // Create a 3D GPU texture containing the empty mask.
+        let texture = gpu.device().create_texture_with_data(
+            gpu.queue(),
+            &TextureDescriptor {
+                label,
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D3,
+                format: TextureFormat::R16Float,
+                usage: TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            TextureDataOrder::LayerMajor,
+            &data,
+        );
+
+        // Set the default mask settings.
+        let settings = VolumeMaskSettings {
+            name,
+            visible: true,
+            offset: 0.0,
+            width: 0.02,
+            inverted: false,
+            sdf: false,
+        };
+
+        // Reuse the existing function to create the settings
+        // buffer and GPU bind group.
+        Self::from_texture_settings(gpu, texture, settings)
+    }
+
+
 
     pub fn size(&self) -> Extent3d {
         self.texture.size()
     }
 
-    pub fn view(&self) -> &TextureView {
-        &self.view
+    pub fn binding(&self) -> &BindGroup {
+        &self.binding
     }
 
     pub fn settings_mut(&mut self) -> &mut VolumeMaskSettings {
         &mut self.settings
+    }
+
+    pub fn update_settings(&self, gpu: &Gpu) {
+        gpu.queue().write_buffer(
+            &self.settings_buffer,
+            0,
+            bytes_of(&self.settings.to_buffer()),
+        );
+    }
+
+    pub fn layout(gpu: &Gpu) -> BindGroupLayout {
+        let visibility = ShaderStages::FRAGMENT | ShaderStages::COMPUTE;
+
+        gpu.device()
+            .create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some(type_name::<Self>()),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility,
+                        ty: BindingType::Texture {
+                            sample_type: TextureSampleType::Float { filterable: true },
+                            view_dimension: TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            })
     }
 
     pub fn settings(&self) -> &VolumeMaskSettings {
@@ -108,16 +225,40 @@ impl VolumeMaskBuffer {
             sdf: false,
         };
 
-        Self::from_texture_settings(texture, settings)
+        Self::from_texture_settings(gpu, texture, settings)
     }
 
-    fn from_texture_settings(texture: Texture, settings: VolumeMaskSettings) -> Self {
-        let view = texture.create_view(&TextureViewDescriptor::default());
+    fn from_texture_settings(gpu: &Gpu, texture: Texture, settings: VolumeMaskSettings) -> Self {
+        let label = Some(type_name::<Self>());
+
+        let settings_buffer = gpu.device().create_buffer_init(&BufferInitDescriptor {
+            label,
+            contents: bytes_of(&settings.to_buffer()),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        });
+
+        let binding = gpu.device().create_bind_group(&BindGroupDescriptor {
+            label,
+            layout: &Self::layout(gpu),
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(
+                        &texture.create_view(&TextureViewDescriptor::default()),
+                    ),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: settings_buffer.as_entire_binding(),
+                },
+            ],
+        });
 
         Self {
             texture,
-            view,
             settings,
+            settings_buffer,
+            binding,
         }
     }
 }

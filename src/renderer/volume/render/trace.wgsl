@@ -1,21 +1,9 @@
-use classify;
 use color;
-use environment;
 use gaussian;
-use microfacet;
 use noise;
 use occlusion;
 use pbr;
-use tracking;
 use uniforms;
-
-// Light each collision with a traced ray to the environment instead of the
-// cascade: the cascade's ground truth.
-const TRACED: bool = false;
-
-// Traced: one Fresnel factor for the whole lobe, at the mirror direction, as
-// the cascade. A const: as a uniform it made the traced shader 2× slower.
-const MIRROR_FRESNEL: bool = false;
 
 @group(0) @binding(0) var RADIANCE: texture_3d<f32>;
 @group(0) @binding(1) var GAUSSIAN: texture_3d<f32>;
@@ -23,17 +11,24 @@ const MIRROR_FRESNEL: bool = false;
 @group(0) @binding(7) var<uniform> CASCADE_OPTS: CascadeOpts;
 @group(0) @binding(8) var PHASE: texture_3d<f32>;
 
+@group(1) @binding(0) var ABSORPTION: texture_3d<f32>;
+@group(1) @binding(1) var SCATTERING: texture_3d<f32>;
+@group(1) @binding(2) var EXTINCTION: texture_3d<f32>;
+@group(1) @binding(3) var PROPERTIES: texture_3d<f32>;
+@group(1) @binding(4) var GRADIENT: texture_3d<f32>;
+@group(1) @binding(5) var SAMPLER: sampler;
+@group(1) @binding(6) var<uniform> TRANSFORM: mat4x4<f32>;
+@group(1) @binding(7) var<uniform> TRANSFORM_INVERSE: mat4x4<f32>;
+
 @group(2) @binding(0) var<uniform> ENVIRONMENT: Environment;
 @group(2) @binding(1) var BLUE_NOISE: texture_3d<f32>;
 
-// Binding 1 is the combined-mode line-depth target: the near→far fraction `s`
-// of the first line hit, used to clamp this trace's far `t`. The rest is only
-// read when TRACED: the environment and the lines as shadow-ray occluders.
+// The environment map itself is already integrated into the radiance cascade,
+// so the volume tracer only needs the HDRI material settings. Binding 1 is the
+// combined-mode line-depth target: the near→far fraction `s` of the first line
+// hit, used to clamp this trace's far `t`.
 @group(3) @binding(0) var<uniform> HDRI_SETTINGS: HdriSettings;
 @group(3) @binding(1) var LINE_DEPTH: texture_2d<f32>;
-@group(3) @binding(2) var ENVIRONMENT_MAP: texture_2d<f32>;
-@group(3) @binding(3) var LINE_EXTINCTION: texture_3d<f32>;
-@group(3) @binding(4) var LINE_SAMPLER: sampler;
 
 struct Fragment {
     @builtin(position) position: vec4<f32>,
@@ -60,9 +55,7 @@ fn fragment(fragment: Fragment) -> @location(0) vec4<f32> {
     let origin = (camera * vec4<f32>(near, 1.0)).xyz;
     let direction = (camera * vec4<f32>(normalize(far - near), 0.0)).xyz;
 
-    // Clipping to the crop box keeps the empty-space skip from marching it.
-    let crop = CLASSIFY.crop;
-    let hit = intersectAABB(origin, direction, max(0.5 + crop.min.xyz, vec3<f32>(0.0)), min(0.5 + crop.max.xyz, vec3<f32>(1.0)));
+    let hit = intersectAABB(origin, direction);
 
     if (hit.x > hit.y) { return vec4<f32>(0.0); }
 
@@ -74,222 +67,79 @@ fn fragment(fragment: Fragment) -> @location(0) vec4<f32> {
     // LINE_DEPTH is cleared to 1.0, making this a no-op where no line was drawn.
     let line_s = textureLoad(LINE_DEPTH, vec2<i32>(fragment.position.xy), 0).r;
 
+    let step = 0.5;
+    let skip = 2.0;
+
     let entry = max(hit.x, 0.0);
-    let exit = min(hit.y, line_s * length(far - near));
+    let t1 = min(hit.y, line_s * length(far - near));
+
+    var transmittance = vec3<f32>(1.0);
+    var color = vec3<f32>(0.0);
 
     // Lobes live in world space, so shading does too.
     let view = -normalize((ENVIRONMENT.camera.transform * vec4<f32>(far - near, 0.0)).xyz);
 
-    let pixel = vec2<u32>(fragment.position.xy);
-
-    // Both estimators share the tentative collisions: spectral delta tracking
-    // (Kutz et al. 2017) picks the one real collision that's shaded, ratio
-    // tracking estimates the transmittance behind alpha.
-    var weight = vec3<f32>(1.0);
-    var transmittance = vec3<f32>(1.0);
-    var collided = false;
-    // The real collision, shaded after the loop so neighbouring pixels shade
-    // together instead of each at its own iteration.
-    var collision = vec3<f32>(0.0);
-    var collision_weight = vec3<f32>(0.0);
-
-    var tracker = begin_tracking(origin, direction, entry, exit);
-
-    // One draw per tentative collision: the optical depth to it carries across
-    // block boundaries, so the first collision takes the pixel's blue noise.
-    var i = 0u;
-    var u = flight_noise(pixel, 2u, i);
-    tracker.depth = -log(1.0 - u.x);
-
-    // Measured fastest: flat for the cascade, nested when traced.
-    while (tracking(tracker)) {
-        if (TRACED) {
-            if (!next_collision(&tracker)) { break; }
-        } else if (!advance(&tracker)) {
-            continue;
-        }
-
-        let majorant = tracker.majorant;
-        let uv = origin + direction * tracker.t;
-        let classified = classify(uv);
-        let material = to_material(classified);
-        let fictitious = max(majorant - material.extinction, vec3<f32>(0.0));
-
-        if (!collided) {
-            let real = average(weight * material.extinction);
-            let total = real + average(weight * fictitious);
-            let p = select(1.0, real / total, total > 0.0);
-
-            if (u.y < p) {
-                collision = uv;
-                collision_weight = weight * material.extinction / (majorant * p);
-                collided = true;
-            } else {
-                weight *= fictitious / (majorant * (1.0 - p));
-            }
-        }
-
-        transmittance *= fictitious / majorant;
-
-        // Russian roulette ends ratio tracking once little light gets through.
-        let largest = max(transmittance.x, max(transmittance.y, transmittance.z));
-        if (largest < ROULETTE) {
-            let survival = largest / ROULETTE;
-            transmittance = select(vec3<f32>(0.0), transmittance / survival, u.z < survival);
-        }
-
-        if (collided && all(transmittance == vec3<f32>(0.0))) { break; }
-
-        i++;
-        u = flight_noise(pixel, 2u, i);
-        tracker.depth = -log(1.0 - u.x);
+    // Coarse empty-space skip on an un-jittered `t0`, so the skipped distance
+    // doesn't flicker frame to frame.
+    var t0 = entry;
+    while (t0 + skip < t1) {
+        if (textureSampleLevel(GRADIENT, SAMPLER, origin + direction * (t0 + skip), 0.0).a > 0.0) { break; }
+        t0 += skip;
     }
 
-    var color = vec3<f32>(0.0);
+    // Step back one stride so the fine march can't miss a thin feature the
+    // look-ahead jumped over, then jitter within a single fine step (not the
+    // whole `[0, 1)` range, which is 2x `step` and just adds sampling variance).
+    let pixel = vec2<u32>(fragment.position.xy);
+    let lookup = noise(pixel, 0u);
+    let pick = noise(pixel, 1u);
 
-    if (collided) {
-        let classified = classify(collision);
-        let material = to_material(classified);
+    t0 = max(t0 - skip, entry) + step * lookup.w;
 
-        if (TRACED) {
-            color = collision_weight * traced_scatter(collision, direction, classified, material, view, pixel);
-        } else {
-            let lookup = noise(pixel, 0u);
-            let pick = noise(pixel, 1u);
-            let noise = StepNoise(tent(lookup.xyz), pick.xyz - 0.5, pick.w, lookup.w);
-            color = collision_weight * scatter(collision, direction, classified, material, view, noise);
-        }
+    var ior = 1.0;
+
+    for (var t = t0; t < t1; t += step) {
+        let uv = origin + direction * t;
+
+        let material = sample_material(uv);
+
+        // Fall back to `view` where the gradient is degenerate (a volume face
+        // cut flat by the domain edge). A zero normal makes `half` below
+        // `normalize(0)` -> NaN, which poisons the accumulation buffer and shows
+        // up as a persistent noisy plane on that face.
+        let normal = sample_normal(uv, view);
+        let light = reflect(-view, normal);
+        let half = normalize(view + light);
+
+        let eta = material.ior / ior;
+        ior = material.ior;
+
+        let eta_boosted = mix(1.0, (eta - 1.0) * 5.0 + 1.0, HDRI_SETTINGS.specular);
+
+        let F = fresnel(dot(view, half), eta_boosted);
+        let Fdr = fresnel_diffuse(eta_boosted);
+
+        let extinction = step * material.extinction;
+
+        if (all(extinction < vec3<f32>(1E-5))) { continue; }
+
+        let transmittance_in_step = 1.0 - exp(-extinction);
+
+        let albedo = material.scattering / max(material.extinction, vec3<f32>(0.001));
+        let i = u32(round((t - t0) / step));
+        let outgoing_radiance = sample_outgoing_radiance(uv, step_noise(lookup, pick, i), normal, view, albedo, F, Fdr);
+
+        color += transmittance * transmittance_in_step * outgoing_radiance;
+
+        transmittance *= exp(-extinction);
+
+        if (all(transmittance <= vec3<f32>(1E-2))) { break; }
     }
 
     let alpha = 1.0 - brightness(transmittance);
 
     // Linear HDR radiance; tone mapping happens once in the present pass.
-    return vec4<f32>(color, alpha);
-}
-
-// The interface at a real collision. The ior one voxel back along the ray sets
-// it; behind a cut (or outside the crop) there's none.
-struct Interface {
-    eta: f32,
-    Fdr: f32,
-    albedo: vec3<f32>,
-}
-
-fn interface_at(uv: vec3<f32>, direction: vec3<f32>, material: Material) -> Interface {
-    let behind = classify(uv - normalize(direction) * voxel_step());
-    let eta = select(material.ior / to_material(behind).ior, 1.0, behind.crop <= 0.0);
-    let eta_boosted = mix(1.0, (eta - 1.0) * 2.0 + 1.0, HDRI_SETTINGS.specular);
-    let albedo = material.scattering / max(material.extinction, vec3<f32>(0.001));
-
-    return Interface(eta_boosted, fresnel_diffuse(eta_boosted), albedo);
-}
-
-// Outgoing radiance at a real collision from the cascade.
-fn scatter(uv: vec3<f32>, direction: vec3<f32>, classified: Classified, material: Material, view: vec3<f32>, noise: StepNoise) -> vec3<f32> {
-    let surface = interface_at(uv, direction, material);
-
-    // Without an interface F is 0 whatever the normal: no gradient, no lobes.
-    var normal = view;
-    var specular = 0.0;
-
-    if (surface.eta != 1.0) {
-        // Fall back to `view` where the gradient is degenerate (a flat plateau).
-        // A zero normal makes `half` below `normalize(0)` -> NaN, which poisons
-        // the accumulation buffer.
-        normal = sample_normal(uv, classified, view);
-        let half = normalize(view + reflect(-view, normal));
-        let F = fresnel(dot(view, half), surface.eta);
-
-        // Russian roulette: the specular lobes run with probability ~F and are
-        // weighted back to F, so weak reflections rarely pay for them.
-        let p = min(F / SPECULAR_ROULETTE, 1.0);
-        specular = select(0.0, F / p, noise.coin < p);
-    }
-
-    return sample_outgoing_radiance(uv, noise, normal, view, surface.albedo, specular, surface.Fdr);
-}
-
-// Fresnel factor at and above which the specular lobes always run.
-const SPECULAR_ROULETTE: f32 = 0.05;
-
-// Outgoing radiance at a real collision from one traced ray to the
-// environment: one-sample MIS (balance heuristic) over bounded VNDF sampling of
-// the GGX lobe and hierarchical warping of the environment, with a uniform
-// share against blocked bright light. The phase is isotropic.
-fn traced_scatter(uv: vec3<f32>, direction: vec3<f32>, classified: Classified, material: Material, view: vec3<f32>, pixel: vec2<u32>) -> vec3<f32> {
-    let surface = interface_at(uv, direction, material);
-    let diffuse = HDRI_SETTINGS.phase * surface.albedo * (1.0 - surface.Fdr) / (4.0 * PI);
-
-    var frame = orthonormal_frame(view);
-    var reflects = false;
-
-    if (surface.eta != 1.0) {
-        frame = orthonormal_frame(sample_normal(uv, classified, view));
-        reflects = dot(frame[2], view) > 0.0;
-    }
-
-    let wi = view * frame;
-    let alpha = max(HDRI_SETTINGS.roughness * HDRI_SETTINGS.roughness, 1e-3);
-
-    // VNDF takes the specular lobe's share of the energy, by its mirror Fresnel.
-    let mirror = select(0.0, fresnel(wi.z, surface.eta), reflects);
-    var specular = mirror / max(mirror + 4.0 * PI * brightness(diffuse), EPSILON);
-
-    let strategy = HDRI_SETTINGS.traced_strategy;
-    if (strategy == STRATEGY_ENVIRONMENT) { specular = 0.0; }
-    if (strategy == STRATEGY_REFLECTION && reflects) { specular = 1.0; }
-
-    let mean = environment_mean();
-    let share = select(1.0, HDRI_SETTINGS.traced_uniform_share, mean > 0.0);
-
-    let xi = noise(pixel, 3u);
-    var omega = vec3<f32>(0.0);
-
-    if (xi.x < specular) {
-        omega = frame * sample_bounded_vndf(wi, alpha, xi.yz);
-    } else if (xi.w < share) {
-        omega = uniform_sphere(xi.yz);
-    } else {
-        omega = sample_environment(xi.yz);
-    }
-
-    let wo = omega * frame;
-
-    var pdf = (1.0 - specular) * (share / (4.0 * PI) + select(0.0, (1.0 - share) * environment_pdf(omega), mean > 0.0));
-    if (reflects) { pdf += specular * bounded_vndf_pdf(wi, wo, alpha); }
-
-    var f = diffuse;
-
-    if (reflects && wo.z > 0.0) {
-        let h = normalize(wi + wo);
-        let alpha2 = alpha * alpha;
-        let F = select(fresnel(dot(wi, h), surface.eta), mirror, MIRROR_FRESNEL);
-        f += F * D_GGX(h.z, alpha) * GGX_V1(wi.z, alpha2) * GGX_V1(wo.z, alpha2) * wo.z;
-    }
-
-    let radiance = f * environment_radiance(omega);
-    if (pdf <= 0.0 || all(radiance <= vec3<f32>(0.0))) { return vec3<f32>(0.0); }
-
-    // To the crop box, through the volume and (as the cascade sees them) lines.
-    let step = linear_part(TRANSFORM) * omega;
-    let crop = CLASSIFY.crop;
-    let exit = intersectAABB(uv, step, max(0.5 + crop.min.xyz, vec3<f32>(0.0)), min(0.5 + crop.max.xyz, vec3<f32>(1.0))).y;
-    let lines = CASCADE_OPTS.include_lines != 0u;
-
-    return radiance * ratio_tracking(uv, step, 0.0, exit, lines, pixel, 4u) / pdf;
-}
-
-// HdriSettings.traced_strategy; 0 is MIS.
-const STRATEGY_ENVIRONMENT: u32 = 1u;
-const STRATEGY_REFLECTION: u32 = 2u;
-
-fn average(v: vec3<f32>) -> f32 {
-    return (v.x + v.y + v.z) / 3.0;
-}
-
-// Matches `to_material`'s reduced scattering.
-fn scattering_scale() -> f32 {
-    return 1.0 / (1.0 - HDRI_SETTINGS.anisotropy);
+    return vec4<f32>(color.rgb, alpha);
 }
 
 struct Material {
@@ -299,29 +149,44 @@ struct Material {
     ior: f32
 };
 
-fn to_material(sum: Classified) -> Material {
-    let scattering = sum.scattering / (1.0 - HDRI_SETTINGS.anisotropy);
+fn sample_material(uv: vec3<f32>) -> Material {
+    let absorption = tex_rgb(ABSORPTION, uv);
+    let reduced_scattering = tex_rgb(SCATTERING, uv);
+    let properties = tex_rgb(PROPERTIES, uv);
 
-    return Material(sum.absorption, scattering, sum.absorption + scattering, average_ior(sum.properties));
+    let scattering = reduced_scattering / (1.0 - HDRI_SETTINGS.anisotropy);
+
+    let extinction = absorption + scattering;
+    let ior = average_ior(properties);
+
+    return Material(absorption, scattering, extinction, ior);
 }
 
-// A gradient maps to world by the transpose of the world → uv transform.
-fn sample_normal(uv: vec3<f32>, classified: Classified, fallback: vec3<f32>) -> vec3<f32> {
-    let normal = -(transpose(linear_part(TRANSFORM)) * sample_gradient(uv, classified));
-    if (length(normal) <= 1E-6) { return fallback; }
+// The gradient is per voxel; a normal maps to world by the transpose of the
+// world → voxel transform.
+fn sample_normal(sample: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    let raw_normal = - 2.0 * textureSampleLevel(GRADIENT, SAMPLER, sample, 0.0).xyz + 1.0;
+    if (length(raw_normal) <= 1E-4) { return fallback; }
 
-    return normalize(normal);
+    let voxels = vec3<f32>(textureDimensions(GRADIENT)) * raw_normal;
+    return normalize(transpose(linear_part(TRANSFORM)) * voxels);
 }
 
-// Per pixel and frame. `tent` in [-1, 1]³ jitters the probe lookup:
+// Per pixel, step and frame. `tent` in [-1, 1]³ jitters the probe lookup:
 // averaged by accumulation, trilinear interpolation becomes a smooth B-spline.
-// `box` in [-½, ½)³ turns a nearest-probe read into trilinear on average,
-// `xi` in [0, 1) picks the lobe and `coin` in [0, 1) plays the specular roulette.
+// `box` in [-½, ½)³ turns a nearest-probe read into trilinear on average, and
+// `xi` in [0, 1) picks the lobe.
 struct StepNoise {
     tent: vec3<f32>,
     box: vec3<f32>,
     xi: f32,
-    coin: f32,
+}
+
+// `lookup.xyz` → tent, `pick.xyz` → box, `pick.w` → ξ; `lookup.w` is the `t0` jitter.
+fn step_noise(lookup: vec4<f32>, pick: vec4<f32>, step: u32) -> StepNoise {
+    let a = advance(lookup, step);
+    let b = advance(pick, step);
+    return StepNoise(tent(a.xyz), b.xyz - 0.5, b.w);
 }
 
 fn sample_outgoing_radiance(
@@ -330,7 +195,7 @@ fn sample_outgoing_radiance(
     normal: vec3<f32>,
     view: vec3<f32>,
     albedo: vec3<f32>,
-    specular: f32,
+    F: f32,
     Fdr: f32) -> vec3<f32>
 {
     let anisotropy = HDRI_SETTINGS.anisotropy;
@@ -339,7 +204,6 @@ fn sample_outgoing_radiance(
         specular_kernel(normal, view, HDRI_SETTINGS.roughness),
         phase_kernel(view, anisotropy),
         abs(anisotropy) < 1e-3,
-        specular > 0.0,
     );
 
     let offset = HDRI_SETTINGS.lookup_jitter * noise.tent;
@@ -354,7 +218,7 @@ fn sample_outgoing_radiance(
         radiance = filtered_lobe(probe_grid_at(GAUSSIAN, uv, offset), noise.xi, shading);
     }
 
-    return radiance.specular * specular + HDRI_SETTINGS.phase * radiance.phase * albedo * (1.0 - Fdr);
+    return radiance.specular * F + HDRI_SETTINGS.phase * radiance.phase * albedo * (1.0 - Fdr);
 }
 
 // The kernels the light lobes are integrated against. Isotropic phase is
@@ -363,8 +227,6 @@ struct Shading {
     specular: Kernel,
     phase: Kernel,
     isotropic: bool,
-    // Whether the specular sum is weighted in at all.
-    reflects: bool,
 }
 
 struct Radiance {
@@ -381,7 +243,7 @@ fn all_lobes(grid: ProbeGrid, shading: Shading) -> Radiance {
     if (shading.isotropic) {
         phase = textureSampleLevel(PHASE, SAMPLER, grid.base / grid.stride, 0.0).rgb;
 
-        for (var k = 0u; k < select(0u, lobes, shading.reflects); k += 4u) {
+        for (var k = 0u; k < lobes; k += 4u) {
             let l0 = grid_lobe(grid, k);
             let l1 = grid_lobe(grid, k + 1u);
             let l2 = grid_lobe(grid, k + 2u);
@@ -519,7 +381,10 @@ fn unproject(v: vec3<f32>) -> vec3<f32> {
     return t.xyz / t.w;
 }
 
-fn intersectAABB(origin: vec3<f32>, direction: vec3<f32>, boxMin: vec3<f32>, boxMax: vec3<f32>) -> vec2<f32> {
+fn intersectAABB(origin: vec3<f32>, direction: vec3<f32>) -> vec2<f32> {
+    let boxMin = vec3<f32>(0.0);
+    let boxMax = vec3<f32>(1.0);
+
     let invDir = 1.0 / direction;
 
     let t1 = (boxMin - origin) * invDir;
@@ -532,6 +397,14 @@ fn intersectAABB(origin: vec3<f32>, direction: vec3<f32>, boxMin: vec3<f32>, box
     let tMax = min(min(tMaxVec.x, tMaxVec.y), tMaxVec.z);
 
     return vec2<f32>(tMin, tMax);
+}
+
+fn tex(tex: texture_3d<f32>, uv: vec3<f32>) -> vec4<f32> {
+    return textureSampleLevel(tex, SAMPLER, uv, 0.0);
+}
+
+fn tex_rgb(tex: texture_3d<f32>, uv: vec3<f32>) -> vec3<f32> {
+    return unpack_rgb(textureSampleLevel(tex, SAMPLER, uv, 0.0));
 }
 
 fn minimum(v: vec3<f32>) -> f32 {
