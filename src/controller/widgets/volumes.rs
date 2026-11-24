@@ -17,6 +17,10 @@ use crate::{
 pub struct VolumesWidget {
     transfer: TransferFunctionEditor,
     changed: bool,
+    // TODO(BRUSH-TARGET-001): The active volume determines the mask edited by
+    // the erase brush. Replace this UI selection with an explicit resection
+    // mask selection when the dedicated GPU resection texture is introduced.
+    selected_volume: Option<u64>,
 }
 
 impl Tracked for VolumesWidget {
@@ -36,6 +40,7 @@ impl VolumesWidget {
         Self {
             transfer: TransferFunctionEditor::new(),
             changed: false,
+            selected_volume: None,
         }
     }
 
@@ -62,12 +67,19 @@ impl VolumesWidget {
         ScrollArea::new([false, true]).show(ui, |ui| {
             for (index, (volume, open)) in zip(volumes.iter_mut(), open).enumerate() {
                 let volume = volume.settings_mut();
+                if self.selected_volume.is_none() {
+                    self.selected_volume = Some(volume.id);
+                }
 
                 ui.frame(|ui| {
                     let title = volume.name.clone();
                     let response = ui.collapse(title, open, |ui| {
                         self.show_volume(ui, volume, masks);
                     });
+
+                    if response.clicked() {
+                        self.selected_volume = Some(volume.id);
+                    }
 
                     ui.inline(&response, |ui| {
                         if ui.delete().track(self).clicked() {
@@ -91,6 +103,30 @@ impl VolumesWidget {
 
     pub fn reset_changed(&mut self) {
         self.changed = false;
+    }
+
+    pub fn erase_mask_index(
+        &self,
+        volumes: &[VolumeFractionBuffer],
+    ) -> Option<usize> {
+        let selected = self.selected_volume;
+        volumes
+            .iter()
+            .find(|volume| {
+                selected.is_some_and(|id| volume.settings().id == id)
+            })
+            .or_else(|| volumes.iter().find(|volume| volume.settings().visible))
+            .map(|volume| volume.settings().mask)
+    }
+
+    pub fn erase_target_name<'a>(
+        &self,
+        volumes: &[VolumeFractionBuffer],
+        masks: &'a [VolumeMaskBuffer],
+    ) -> &'a str {
+        self.erase_mask_index(volumes)
+            .and_then(|index| masks.get(index))
+            .map_or("None", |mask| mask.settings().name.as_str())
     }
 
     fn show_volume(

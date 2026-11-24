@@ -1,6 +1,8 @@
-use egui::{Grid, Ui};
+use egui::{Grid, Slider, Ui};
 
-use crate::controller::{components::UIComponents, icons};
+use crate::{
+    controller::{components::UIComponents, icons, settings::Settings},
+};
 
 pub struct ControlsWidget {}
 
@@ -15,7 +17,57 @@ impl ControlsWidget {
         Self {}
     }
 
-    pub fn show(&self, ui: &mut Ui) {
+    pub fn show(
+        &self,
+        ui: &mut Ui,
+        settings: &mut Settings,
+        erase_target_name: &str,
+    ) {
+        let erase_open = ui.is_new("Controls.EraseBrush");
+        ui.collapse(
+            format!("{} Erase Brush", icons::regular::ERASER),
+            erase_open,
+            |ui| {
+                ui.checkbox(&mut settings.erase_brush, "Enabled")
+                    .on_hover_text(
+                        "Enable the erase brush to remove tissue in the 3D view. \
+                         (Ctrl + Caps Lock to toggle)",
+                    );
+
+                ui.add_enabled(
+                    settings.erase_brush,
+                    egui::Label::new(format!("(Mask) Erase target: {erase_target_name}")),
+                )
+                .on_hover_text(
+                    "The brush edits the mask assigned to the active volume in \
+                     the Volumes tab.",
+                );
+
+                // TODO(BRUSH-RADIUS-001): This is a prototype pixel-based
+                // radius. Convert it to 1-20 mm using NIfTI voxel spacing or
+                // the volume transform in the final resection-mask build.
+                ui.add_enabled(
+                    settings.erase_brush,
+                    Slider::new(&mut settings.brush_radius, 0.01..=100.0)
+                        .text("Brush radius")
+                        .suffix(" px"),
+                );
+                ui.add_enabled(
+                    settings.erase_brush,
+                    egui::Checkbox::new(
+                        &mut settings.show_brush_center_dot,
+                        "Show center dot",
+                    ),
+                );
+
+                let erase_actions = [
+                    ("Toggle", "Ctrl + Caps Lock"),
+                    ("Erase", "Left Mouse Button"),
+                ];
+                Self::actions_grid(ui, "ControlsEraseGrid", &erase_actions);
+            },
+        );
+
         let camera_actions = [
             ("Rotate", "Left Mouse Button"),
             ("Pan", "Right Mouse Button"),
