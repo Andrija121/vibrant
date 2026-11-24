@@ -3,6 +3,7 @@ pub mod components;
 pub mod event;
 pub mod icons;
 pub mod light;
+pub mod picking;
 pub mod settings;
 pub mod state;
 pub mod status;
@@ -13,6 +14,7 @@ use egui::{Align, CentralPanel, Frame, Layout, Ui};
 use egui::{Panel, Rect};
 use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle};
 use event::Event;
+use glam::{Vec2, Vec3};
 use light::Light;
 use settings::Settings;
 use state::ControllerState;
@@ -174,6 +176,12 @@ pub struct Controller {
 
     viewport: Rect,
     hovered: bool,
+
+    /// The 3D world-space point under the mouse cursor, computed every frame
+    /// from `state.position`, `viewport`, and the camera matrices.
+    /// Uses pivot-plane intersection so it is always valid when the cursor is
+    /// over the 3D viewport. `None` when the viewport has zero size.
+    mouse_world: Option<Vec3>,
 }
 
 impl Default for Controller {
@@ -202,6 +210,8 @@ impl Controller {
 
             viewport: Rect::ZERO,
             hovered: true,
+
+            mouse_world: None,
         }
     }
 
@@ -318,14 +328,19 @@ impl Controller {
                     ));
                 }
 
-                ui.take_available_width();
-
                 let mut status = Status::default();
                 if let Some((built, total)) = warmup::progress() {
                     status.progress(
                         format!("Compiling shaders {built}/{total}"),
                         built as f32 / total as f32,
                     );
+                }
+
+                // Show the live 3D coordinates in the top toolbar
+                if let Some(p) = self.mouse_world {
+                    ui.separator();
+                    ui.label(format!("Cursor 3D: ({:.1}, {:.1}, {:.1})", p.x, p.y, p.z))
+                        .on_hover_text("3D world-space position under the mouse cursor");
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -400,15 +415,72 @@ impl Controller {
                     egui::Rect::from_center_size(ui.max_rect().center(), egui::Vec2::splat(48.0));
                 egui::Spinner::new().size(32.0).paint_at(ui, rect);
             }
+
+            // Always-visible HUD badge in the bottom-right of the 3D viewport
+            if let Some(p) = self.mouse_world {
+                let text = format!("3D: ({:.1}, {:.1}, {:.1})", p.x, p.y, p.z);
+                let font_id = egui::FontId::monospace(13.0);
+                let text_pos = ui.max_rect().right_bottom() - egui::vec2(16.0, 16.0);
+                ui.painter().text(
+                    text_pos,
+                    egui::Align2::RIGHT_BOTTOM,
+                    text,
+                    font_id,
+                    egui::Color32::from_white_alpha(200),
+                );
+            }
         });
 
         self.hovered = viewport.response.hovered();
         self.viewport = viewport.response.rect * scale;
         self.camera.set_aspect(self.viewport.aspect_ratio());
+
+        // ── Mouse → 3D world position ─────────────────────────────────────────
+        // Compute once per frame after the viewport rect is locked in.
+        // Uses pivot-plane intersection so we always get a valid point when
+        // the cursor is over the 3D canvas (no GPU readback needed).
+        self.mouse_world = {
+            let vp = self.viewport;
+            let vp_min = Vec2::new(vp.min.x, vp.min.y);
+            let vp_size = Vec2::new(vp.width(), vp.height());
+            let mouse = self.state.position;
+
+            picking::mouse_ray(
+                mouse,
+                vp_min,
+                vp_size,
+                self.camera.projection(),
+                self.camera.transform(),
+            )
+            .and_then(|ray| {
+                // In left-handed view space, the orbit camera looks along +Z,
+                // and the pivot is at (0, 0, distance).
+                // Transforming these by camera.transform() gives their exact
+                // world-space counterparts for any yaw, pitch, or pan.
+                let cam = self.camera.transform();
+                let pivot = (cam * glam::Vec4::new(0.0, 0.0, self.camera.distance, 1.0)).truncate();
+                let forward = (cam * glam::Vec4::new(0.0, 0.0, 1.0, 0.0))
+                    .truncate()
+                    .normalize();
+                // Plane through pivot facing camera (normal points against forward direction)
+                let plane_normal = -forward;
+                picking::ray_pivot_point(&ray, pivot, plane_normal)
+            })
+        };
     }
 
     pub fn camera(&self) -> &Camera {
         &self.camera
+    }
+
+    /// The 3D world-space point directly under the mouse cursor this frame.
+    ///
+    /// Computed by unprojecting the mouse pixel through the camera matrices
+    /// and intersecting with the pivot plane (the plane the orbit camera rotates
+    /// around). Always returns a valid point when the cursor is over the 3D
+    /// viewport. Returns `None` when the viewport is not yet initialised.
+    pub fn mouse_world_position(&self) -> Option<Vec3> {
+        self.mouse_world
     }
 
     /// Whether the view moved since the last call (rotate/pan/zoom/reset),

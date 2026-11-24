@@ -6,17 +6,13 @@
 //   cargo bench --bench pipeline -- --test  # one pass each, no timing
 //   cargo bench --bench pipeline -- line_shading  # line/render with/without contact occlusion
 //   ALPHA=0.1 cargo bench --bench pipeline -- line/render  # line opacity (default 1)
-//   TRACED=1 cargo bench --bench pipeline -- volume/render  # ray traced lighting
-//   TRACED=1 MIRROR=1 cargo bench --bench pipeline -- volume/render  # with mirror Fresnel
 
 mod harness;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn bench_pipeline(c: &mut Criterion) {
-    let mut bench = harness::setup();
-    bench.controller.settings_mut().ray_traced = std::env::var("TRACED").is_ok();
-    bench.controller.settings_mut().mirror_fresnel = std::env::var("MIRROR").is_ok();
+    let bench = harness::setup();
     bench.prime_frame();
 
     let mut group = c.benchmark_group("pipeline");
@@ -65,8 +61,26 @@ fn bench_pipeline(c: &mut Criterion) {
 
     // --- Shared medium ---
 
-    group.bench_function("volume/transfer", |t| {
-        t.iter(|| b.time_pass(|cmd| b.volume_transfer.dispatch(&b.gpu, cmd, &b.asset)))
+    group.bench_function("volume/transfer_begin", |t| {
+        t.iter(|| {
+            b.time_pass(|cmd| {
+                b.volume_transfer.begin(
+                    cmd,
+                    &b.asset.volumes,
+                    &b.asset.masks,
+                    b.pv(),
+                    &b.asset.crop,
+                )
+            })
+        })
+    });
+
+    group.bench_function("volume/transfer_finalize", |t| {
+        t.iter(|| b.time_pass(|cmd| b.volume_transfer.finalize(cmd, b.pv())))
+    });
+
+    group.bench_function("gradient", |t| {
+        t.iter(|| b.time_pass(|cmd| b.gradient.dispatch(cmd, b.pv())))
     });
 
     group.bench_function("line/deposit", |t| {
@@ -120,13 +134,8 @@ fn bench_pipeline(c: &mut Criterion) {
         t.iter(|| {
             b.time_pass(|cmd| {
                 b.accumulate_buffer.set_sample(&b.gpu, 1);
-                b.accumulate.accumulate(
-                    cmd,
-                    &b.accumulate_buffer,
-                    &b.frame,
-                    b.frame.accum(0, 0),
-                    b.frame.accum(0, 1),
-                )
+                b.accumulate
+                    .accumulate(cmd, &b.accumulate_buffer, &b.frame, 0)
             })
         })
     });
@@ -137,8 +146,8 @@ fn bench_pipeline(c: &mut Criterion) {
                 b.accumulate.reduce(
                     cmd,
                     &b.accumulate_buffer,
-                    b.frame.accum(0, 0),
-                    b.frame.accum(0, 1),
+                    b.frame.accum(0),
+                    b.frame.accum(1),
                 )
             })
         })
