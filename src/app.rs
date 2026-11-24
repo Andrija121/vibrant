@@ -261,10 +261,11 @@ fn vibrant_event(event: WindowEvent) -> Option<Event> {
                 KeyEvent {
                     physical_key: PhysicalKey::Code(code),
                     state: ElementState::Pressed,
+                    repeat,
                     ..
                 },
             is_synthetic: _,
-        } => keycode(code).map(Event::KeyPressed),
+        } if !repeat => keycode(code).map(Event::KeyPressed),
         WindowEvent::KeyboardInput {
             event:
                 KeyEvent {
@@ -283,6 +284,8 @@ fn keycode(code: KeyCode) -> Option<Key> {
         KeyCode::ShiftLeft => Some(Key::Shift),
         KeyCode::ShiftRight => Some(Key::Shift),
         KeyCode::Backspace => Some(Key::Backspace),
+        KeyCode::CapsLock => Some(Key::CapsLock),
+        KeyCode::ControlLeft => Some(Key::Control),
         KeyCode::NumpadBackspace => Some(Key::Backspace),
         _ => None,
     }
