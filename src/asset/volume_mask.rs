@@ -65,7 +65,10 @@ impl VolumeMaskBuffer {
         let total_voxels = (size.width * size.height * size.depth_or_array_layers) as usize;
         
         
-        let data = vec![1.0f32; total_voxels];
+        let mut data = vec![1.0f32; total_voxels];
+        for i in 0..(total_voxels / 2) {
+            data[i] = 0.0;
+        }
 
         let texture = gpu.device().create_texture_with_data(
             gpu.queue(),
